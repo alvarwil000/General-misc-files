@@ -1,0 +1,1 @@
+create a single html file that shows fractals in 3d that i can explore with no external libraries.least amount of lines possible with wasd and first person controls and make it move slower the closer it is to a "feature" so i can see the details. and make it fade into blue the farther something is
