@@ -2,31 +2,30 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Archive Loader</title>
+<title>Local Archive Viewer</title>
 <style>
-  html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #111; color: #ddd; font-family: "Times New Roman", serif; overflow: hidden; }
-  #door { box-sizing: border-box; width: 92vw; height: 92vh; margin: 4vh auto; padding: 30px; border: 3px solid #555; background: #181818; }
-  h1 { font-size: 36px; margin-top: 0; }
-  p, label, button, input { font-size: 18px; }
-  progress { width: 100%; height: 28px; margin-top: 15px; }
-  #frame { display: none; width: 100vw; height: 100vh; border: none; position: fixed; top: 0; left: 0; background: #000; }
-  #fs { position: fixed; top: 8px; right: 8px; z-index: 999999; background: #333; color: #fff; border: 2px outset #777; padding: 6px 10px; cursor: pointer; }
-  :fullscreen #fs, :-webkit-full-screen #fs { display: none !important; pointer-events: none !important; }
+  body { background: #121212; color: #e0e0e0; font-family: "Comic Sans MS", "Comic Sans", cursive, sans-serif; margin: 0; padding: 20px; font-size: 20px; }
+  #door { border: 2px solid #555; padding: 30px; min-height: 85vh; box-sizing: border-box; }
+  input, button, progress { font-family: "Comic Sans MS", "Comic Sans", cursive, sans-serif; font-size: 20px; background: #222; color: #fff; border: 1px solid #777; padding: 10px 15px; margin-top: 10px; }
+  button:hover { background: #333; cursor: pointer; }
+  progress { width: 100%; height: 30px; padding: 0; }
+  #fs { position: fixed; top: 10px; right: 10px; z-index: 999999; margin: 0; font-size: 16px; padding: 8px 12px; }
+  :fullscreen #fs, :-webkit-full-screen #fs { display: none !important; pointer-events: none !important; visibility: hidden !important; }
+  iframe { position: fixed; inset: 0; width: 100vw; height: 100vh; border: none; display: none; background: #000; }
 </style>
 </head>
 <body>
 
-<button id="fs" onclick="document.documentElement.requestFullscreen()">[ Fullscreen ]</button>
+<button id="fs" onclick="document.documentElement.requestFullscreen()">Fullscreen</button>
 
 <div id="door">
-  <h1>Local Archive Document Viewer</h1>
-  <p>Select a .zip archive containing an index.html file and local resources.</p>
-  <hr color="#444">
-  <p><label for="file">Choose file: </label><input type="file" id="file" accept=".zip"></p>
-  <p><button id="play">Play</button></p>
-  <div id="loading" style="display:none;">
+  <h1>Local Folder Unpacker</h1>
+  <p>Select a .zip archive from your computer to unpack and view it offline.</p>
+  <input type="file" id="zipInput" accept=".zip"><br><br>
+  <button onclick="run()">Play</button>
+  <div id="statusBox" style="display:none; margin-top: 30px;">
+    <p id="statusText">Waiting...</p>
     <progress id="bar" value="0" max="100"></progress>
-    <p id="status">Waiting...</p>
   </div>
 </div>
 
@@ -34,7 +33,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-const MIME = { html:'text/html', htm:'text/html', js:'application/javascript', mjs:'application/javascript', css:'text/css', json:'application/json', png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg', gif:'image/gif', svg:'image/svg+xml', webp:'image/webp', wav:'audio/wav', mp3:'audio/mpeg', ogg:'audio/ogg', wasm:'application/wasm', txt:'text/plain' };
+const log = (msg, pct) => { $('statusText').textContent = msg; if (pct !== undefined) $('bar').value = pct; };
 
 async function inflateRaw(data) {
   const ds = new DecompressionStream('deflate-raw');
@@ -44,14 +43,19 @@ async function inflateRaw(data) {
   return new Uint8Array(await new Response(ds.readable).arrayBuffer());
 }
 
-$('play').onclick = async () => {
-  const f = $('file').files[0];
-  if (!f) return alert('No file chosen.');
-  $('play').disabled = true;
-  $('loading').style.display = 'block';
-  $('status').textContent = 'Reading ' + f.name + '...';
+function getMime(name) {
+  const ext = name.split('.').pop().toLowerCase();
+  const map = { html:'text/html', htm:'text/html', js:'application/javascript', mjs:'application/javascript', css:'text/css', json:'application/json', png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg', gif:'image/gif', svg:'image/svg+xml', webp:'image/webp', mp3:'audio/mpeg', ogg:'audio/ogg', wav:'audio/wav', wasm:'application/wasm', txt:'text/plain' };
+  return map[ext] || 'application/octet-stream';
+}
 
-  const buf = await f.arrayBuffer();
+async function run() {
+  const file = $('zipInput').files[0];
+  if (!file) return alert('Choose a zip file first.');
+  $('statusBox').style.display = 'block';
+  log(`Reading ${file.name} into memory...`, 5);
+
+  const buf = await file.arrayBuffer();
   const view = new DataView(buf);
   const bytes = new Uint8Array(buf);
   const dec = new TextDecoder();
@@ -60,72 +64,76 @@ $('play').onclick = async () => {
   for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 65557); i--) {
     if (view.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
   }
-  if (eocd < 0) return $('status').textContent = 'Error: Invalid zip file.';
+  if (eocd === -1) return log('Error: Invalid ZIP archive.', 0);
 
-  const total = view.getUint16(eocd + 10, true);
+  const totalEntries = view.getUint16(eocd + 10, true);
   let ptr = view.getUint32(eocd + 16, true);
-  const entries = [];
+  const files = {};
 
-  for (let i = 0; i < total; i++) {
+  for (let i = 0; i < totalEntries; i++) {
     if (view.getUint32(ptr, true) !== 0x02014b50) break;
     const method = view.getUint16(ptr + 10, true);
     const compSize = view.getUint32(ptr + 20, true);
     const nameLen = view.getUint16(ptr + 28, true);
     const extraLen = view.getUint16(ptr + 30, true);
     const commentLen = view.getUint16(ptr + 32, true);
-    const localOff = view.getUint32(ptr + 42, true);
+    const localOffset = view.getUint32(ptr + 42, true);
     const name = dec.decode(bytes.subarray(ptr + 46, ptr + 46 + nameLen));
-    entries.push({ name, method, compSize, localOff });
     ptr += 46 + nameLen + extraLen + commentLen;
+
+    if (name.endsWith('/')) continue;
+    log(`Unzipping ${name}...`, 10 + Math.round((i / totalEntries) * 70));
+
+    const lNameLen = view.getUint16(localOffset + 26, true);
+    const lExtraLen = view.getUint16(localOffset + 28, true);
+    const dataStart = localOffset + 30 + lNameLen + lExtraLen;
+    const rawData = bytes.subarray(dataStart, dataStart + compSize);
+
+    let unpacked;
+    if (method === 0) unpacked = rawData;
+    else if (method === 8) unpacked = await inflateRaw(rawData);
+    else return log(`Unsupported compression method (${method}) on ${name}`, 0);
+
+    files[name] = unpacked;
   }
 
-  const files = {};
-  for (let i = 0; i < entries.length; i++) {
-    const e = entries[i];
-    $('bar').value = Math.round(((i + 1) / entries.length) * 85);
-    if (e.name.endsWith('/')) continue;
-    $('status').textContent = 'unzipping ' + e.name;
-    await new Promise(r => setTimeout(r, 0));
-
-    const lNameLen = view.getUint16(e.localOff + 26, true);
-    const lExtraLen = view.getUint16(e.localOff + 28, true);
-    const dataStart = e.localOff + 30 + lNameLen + lExtraLen;
-    const raw = bytes.subarray(dataStart, dataStart + e.compSize);
-    files[e.name] = e.method === 0 ? raw : await inflateRaw(raw);
-  }
-
-  $('status').textContent = 'Locating index.html...';
-  const indexKey = Object.keys(files).sort((a, b) => a.length - b.length).find(k => /(^|\/)index\.html?$/i.test(k));
-  if (!indexKey) return $('status').textContent = 'Error: index.html not found in zip.';
+  const allPaths = Object.keys(files);
+  const indexKey = allPaths.sort((a, b) => a.length - b.length).find(p => p.toLowerCase() === 'index.html' || p.toLowerCase().endsWith('/index.html'));
+  if (!indexKey) return log('Error: No index.html found inside zip.', 0);
 
   const baseDir = indexKey.includes('/') ? indexKey.slice(0, indexKey.lastIndexOf('/') + 1) : '';
-  const blobs = {};
+  const blobUrls = {};
 
-  $('status').textContent = 'Building local memory URLs...';
+  log('Creating local asset links...', 85);
   for (const [path, data] of Object.entries(files)) {
-    if (path === indexKey) continue;
-    const ext = path.split('.').pop().toLowerCase();
-    const rel = path.startsWith(baseDir) ? path.slice(baseDir.length) : path;
-    blobs[rel] = URL.createObjectURL(new Blob([data], { type: MIME[ext] || 'application/octet-stream' }));
+    if (!path.startsWith(baseDir) || path === indexKey) continue;
+    const relPath = path.slice(baseDir.length);
+    let content = data;
+    if (relPath.endsWith('.css')) {
+      let cssText = dec.decode(data);
+      cssText = cssText.replace(/url\(['"]?([^'")]+)['"]?\)/g, (m, u) => {
+        const clean = u.replace(/^\.\//, '');
+        return blobUrls[clean] ? `url("${blobUrls[clean]}")` : m;
+      });
+      content = new TextEncoder().encode(cssText);
+    }
+    blobUrls[relPath] = URL.createObjectURL(new Blob([content], { type: getMime(relPath) }));
   }
 
-  $('bar').value = 95;
-  $('status').textContent = 'Linking scripts and assets into index.html...';
+  log('Patching index.html references...', 95);
   let html = dec.decode(files[indexKey]);
-  const sortedPaths = Object.keys(blobs).sort((a, b) => b.length - a.length);
-  for (const rel of sortedPaths) {
-    const esc = rel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    html = html.replace(new RegExp(`(["'\`(=])(?:\\./)?${esc}(["'\` )>])`, 'g'), `$1${blobs[rel]}$2`);
+  const sortedKeys = Object.keys(blobUrls).sort((a, b) => b.length - a.length);
+  for (const rel of sortedKeys) {
+    const escaped = rel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    html = html.replace(new RegExp(`(['"\`])(\\.\\/)?${escaped}(['"\`])`, 'g'), `$1${blobUrls[rel]}$3`);
   }
 
-  $('bar').value = 100;
-  $('status').textContent = 'Starting...';
-  const indexUrl = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
-
+  log('Launching...', 100);
+  const mainBlob = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
   $('door').style.display = 'none';
   $('frame').style.display = 'block';
-  $('frame').src = indexUrl;
-};
+  $('frame').src = mainBlob;
+}
 </script>
 </body>
 </html>
